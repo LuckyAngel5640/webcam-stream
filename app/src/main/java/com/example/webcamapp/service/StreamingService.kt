@@ -65,7 +65,7 @@ class StreamingService : Service() {
         if (isStreaming) return
 
         val cameraId = intent.getStringExtra("cameraId") ?: "camera_${android.os.Build.SERIAL}"
-        val serverUrl = intent.getStringExtra("serverUrl") ?: "wss://dreamcast.cam/signaling"
+        val serverUrl = intent.getStringExtra("serverUrl") ?: "wss://ubuntu-production-8e92.up.railway.app/signaling"
         val port = intent.getIntExtra("port", 8080)
 
         streamConfig = StreamConfig(cameraId = cameraId)

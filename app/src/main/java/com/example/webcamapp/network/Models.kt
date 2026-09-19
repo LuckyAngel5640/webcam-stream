@@ -22,7 +22,7 @@ data class MotionAlert(
 )
 
 data class SignalingConfig(
-    val serverUrl: String = "wss://dreamcast.cam/signaling",
+    val serverUrl: String = "wss://ubuntu-production-8e92.up.railway.app/signaling",
     val stunServers: List<String> = listOf("stun:stun.l.google.com:19302"),
     val turnServers: List<TurnServer> = emptyList()
 )

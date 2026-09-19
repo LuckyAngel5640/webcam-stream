@@ -7,7 +7,7 @@ import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import { useSignaling } from './hooks/useSignaling';
 
-const SIGNALING_URL = process.env.REACT_APP_SIGNALING_URL || 'wss://dreamcast.cam/signaling';
+const SIGNALING_URL = process.env.REACT_APP_SIGNALING_URL || 'wss://ubuntu-production-8e92.up.railway.app/signaling';
 
 function App() {
   const [cameras, setCameras] = useState([]);
