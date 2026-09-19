@@ -72,7 +72,7 @@ dependencies {
     implementation("androidx.camera:camera-video:1.3.2")
 
     // WebRTC for push streaming - push video to server like CCTV
-    implementation("org.webrtc:google-webrtc:1.0.32006")
+    implementation("org.webrtc:google-webrtc:M113")
 
     // ML Kit - using simple frame differencing for motion detection instead
     // implementation("com.google.mlkit:object-detection:17.2.0")
