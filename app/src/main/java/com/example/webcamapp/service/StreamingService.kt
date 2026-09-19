@@ -7,13 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
+import android.graphics.ImageFormat
+import android.graphics.YuvImage
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -21,96 +19,37 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import com.example.webcamapp.R
 import com.example.webcamapp.camera.CameraManager
+import com.example.webcamapp.network.MotionAlert
 import com.example.webcamapp.network.StreamConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.webrtc.AudioSource
-import org.webrtc.AudioTrack
-import org.webrtc.Camera1Enumerator
-import org.webrtc.Camera2Enumerator
-import org.webrtc.CameraEnumerator
-import org.webrtc.CameraVideoCapturer
-import org.webrtc.DataChannel
-import org.webrtc.DefaultVideoDecoderFactory
-import org.webrtc.DefaultVideoEncoderFactory
-import org.webrtc.EglBase
-import org.webrtc.IceCandidate
-import org.webrtc.MediaConstraints
-import org.webrtc.MediaStream
-import org.webrtc.PeerConnection
-import org.webrtc.PeerConnectionFactory
-import org.webrtc.RtpParameters
-import org.webrtc.RtpTransceiver
-import org.webrtc.SdpObserver
-import org.webrtc.SessionDescription
-import org.webrtc.SurfaceTextureHelper
-import org.webrtc.VideoCapturer
-import org.webrtc.VideoEncoderFactory
-import org.webrtc.VideoFrame
-import org.webrtc.VideoSink
-import org.webrtc.VideoSource
-import org.webrtc.VideoTrack
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okio.ByteString
-import com.google.gson.Gson
+import java.io.ByteArrayOutputStream
+import java.net.ServerSocket
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 class StreamingService : Service() {
 
     private var cameraManager: CameraManager? = null
     private var streamConfig: StreamConfig? = null
     private var isStreaming = false
+    private var mjpegServer: MjpegServer? = null
+    private var lastFrame: ByteBuffer? = null
+    private val frameLock = Any()
 
     private val notificationId = 1001
     private val channelId = "streaming_channel"
 
-    // WebRTC
-    private var peerConnectionFactory: PeerConnectionFactory? = null
-    private var peerConnection: PeerConnection? = null
-    private var videoTrack: VideoTrack? = null
-    private var videoSource: VideoSource? = null
-    private var videoCapturer: VideoCapturer? = null
-    private var eglBase: EglBase? = null
-    private var surfaceTextureHelper: SurfaceTextureHelper? = null
-    private var webSocket: WebSocket? = null
-    private var cameraId: String = ""
-    private var serverUrl: String = "wss://ubuntu-production-8e92.up.railway.app/signaling"
-
-    private val notificationId = 1001
-    private val channelId = "streaming_channel"
+    // Simple motion detection state
+    private var previousFrame: ByteArray? = null
+    private val motionThreshold = 5000
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        initWebRTC()
-    }
-
-    private fun initWebRTC() {
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions.builder(this)
-                .setEnableInternalTracer(true)
-                .createInitializationOptions()
-        )
-
-        val encoderFactory = DefaultVideoEncoderFactory(
-            EglBase.create().eglBaseContext,
-            true,
-            true
-        )
-        val decoderFactory = DefaultVideoDecoderFactory(EglBase.create().eglBaseContext)
-
-        peerConnectionFactory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(encoderFactory)
-            .setVideoDecoderFactory(decoderFactory)
-            .createPeerConnectionFactory()
-
-        eglBase = EglBase.create()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -125,20 +64,17 @@ class StreamingService : Service() {
     private fun startStreaming(intent: Intent) {
         if (isStreaming) return
 
-        cameraId = intent.getStringExtra("cameraId") ?: "camera_${android.os.Build.SERIAL}"
-        serverUrl = intent.getStringExtra("serverUrl") ?: "wss://ubuntu-production-8e92.up.railway.app/signaling"
+        val cameraId = intent.getStringExtra("cameraId") ?: "camera_${android.os.Build.SERIAL}"
+        val serverUrl = intent.getStringExtra("serverUrl") ?: "wss://ubuntu-production-8e92.up.railway.app/signaling"
+        val port = intent.getIntExtra("port", 8080)
 
         streamConfig = StreamConfig(cameraId = cameraId)
 
-        val notification = createNotification("Connecting to server...")
-        startForeground(notificationId, notification)
-
-        // Start camera
         cameraManager = CameraManager(
             this,
             streamConfig!!,
             onFrameCallback = { data, width, height ->
-                onCameraFrame(data, width, height)
+                processFrame(data, width, height)
             },
             onError = { error ->
                 Log.e("StreamingService", "Camera error: $error")
@@ -146,208 +82,74 @@ class StreamingService : Service() {
             }
         )
 
-        cameraManager?.start(previewView = null)
+        val notification = createNotification("Starting stream...")
+        startForeground(notificationId, notification)
 
-        // Connect to signaling server
-        connectToSignalingServer()
+        mjpegServer = MjpegServer(port)
+        mjpegServer?.start()
+
+        cameraManager?.start(previewView = null)
 
         isStreaming = true
     }
 
-    private fun connectToSignalingServer() {
-        val client = OkHttpClient.Builder().build()
-        val request = Request.Builder().url(serverUrl).build()
+    private fun processFrame(data: ByteBuffer, width: Int, height: Int) {
+        val copy = ByteBuffer.allocateDirect(data.remaining())
+        copy.put(data)
+        copy.rewind()
 
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d("StreamingService", "WebSocket connected")
-                runOnUiThread { updateNotification("Connected, registering...") }
-                
-                // Register camera
-                val registerMsg = SignalingMessage(
-                    type = "register",
-                    cameraId = cameraId
+        // Update MJPEG server
+        mjpegServer?.setFrame(copy, width, height)
+
+        // Simple motion detection using frame differencing
+        detectMotion(copy, width, height)
+    }
+
+    private fun detectMotion(currentFrame: ByteBuffer, width: Int, height: Int) {
+        val currentBytes = ByteArray(currentFrame.remaining())
+        currentFrame.rewind()
+        currentFrame.get(currentBytes)
+
+        if (previousFrame != null) {
+            var diff = 0
+            for (i in 0 until currentBytes.size) {
+                val diffVal = abs(currentBytes[i].toInt() - previousFrame!![i].toInt())
+                if (diffVal > 30) diff++
+            }
+
+            if (diff > motionThreshold) {
+                // Motion detected - capture frame as JPEG
+                val yuvImage = YuvImage(
+                    currentBytes,
+                    ImageFormat.NV21,
+                    width,
+                    height,
+                    null
                 )
-                webSocket.send(registerMsg.toJson())
+                val baos = ByteArrayOutputStream()
+                yuvImage.compressToJpeg(android.graphics.Rect(0, 0, width, height), 70, baos)
+                val jpegBytes = baos.toByteArray()
+                val base64Image = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
 
-                // Create peer connection and offer
-                createPeerConnection()
-            }
+                val alert = MotionAlert(
+                    id = "${streamConfig?.cameraId}_${System.currentTimeMillis()}",
+                    cameraId = streamConfig?.cameraId ?: "",
+                    timestamp = System.currentTimeMillis(),
+                    imageBase64 = base64Image
+                )
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                handleSignalingMessage(text)
-            }
-
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(1000, null)
-                runOnUiThread { updateNotification("Disconnected") }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e("StreamingService", "WebSocket error", t)
-                runOnUiThread { updateNotification("Connection failed: ${t.message}") }
-            }
-        })
-    }
-
-    private fun createPeerConnection() {
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        )
-
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-        }
-
-        peerConnection = peerConnectionFactory?.createPeerConnection(
-            iceServers,
-            constraints,
-            object : PeerConnection.Observer() {
-                override fun onIceCandidate(candidate: IceCandidate) {
-                    val msg = SignalingMessage(
-                        type = "candidate",
-                        cameraId = cameraId,
-                        candidate = candidate.sdp,
-                        sdpMid = candidate.sdpMid,
-                        sdpMLineIndex = candidate.sdpMLineIndex
-                    )
-                    webSocket?.send(msg.toJson())
-                }
-
-                override fun onSignalingChangeState(state: PeerConnection.SignalingState) {}
-                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-                    Log.d("StreamingService", "ICE state: $state")
-                    if (state == PeerConnection.IceConnectionState.CONNECTED) {
-                        runOnUiThread { updateNotification("Streaming live!") }
-                    }
-                }
-                override fun onIceConnectionReceivingChange(receiving: Boolean) {}
-                override fun onAddStream(stream: MediaStream) {}
-                override fun onRemoveStream(stream: MediaStream) {}
-                override fun onDataChannel(dataChannel: DataChannel) {}
-                override fun onRenegotiationNeeded() {}
-                override fun onAddTrack(receiver: RtpReceiver, streams: Array<MediaStream>) {}
-            }
-        )
-
-        // Create video track
-        videoSource = peerConnectionFactory?.createVideoSource(false)
-        videoTrack = peerConnectionFactory?.createVideoTrack("camera_video", videoSource!!)
-        
-        val localStream = peerConnectionFactory?.createLocalMediaStream("camera_stream")
-        localStream?.addTrack(videoTrack!!)
-        
-        peerConnection?.addTrack(videoTrack!!, listOf("camera_stream"))
-
-        // Start camera capturer
-        startCameraCapturer()
-
-        // Create offer
-        peerConnection?.createOffer(
-            object : SdpObserver {
-                override fun onCreateSuccess(sessionDescription: SessionDescription) {
-                    peerConnection?.setLocalDescription(this, sessionDescription)
-                    val msg = SignalingMessage(
-                        type = "offer",
-                        cameraId = cameraId,
-                        sdp = sessionDescription.description
-                    )
-                    webSocket?.send(msg.toJson())
-                }
-                override fun onCreateFailure(error: String) {
-                    Log.e("StreamingService", "Create offer failed: $error")
-                }
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String) {
-                    Log.e("StreamingService", "Set local description failed: $error")
-                }
-            },
-            MediaConstraints()
-        )
-    }
-
-    private fun startCameraCapturer() {
-        val cameraEnumerator: CameraEnumerator = if (Camera2Enumerator.isSupported(this)) {
-            Camera2Enumerator(this)
-        } else {
-            Camera1Enumerator(false)
-        }
-
-        val deviceNames = cameraEnumerator.getDeviceNames()
-        var selectedDevice: String? = null
-        
-        for (name in deviceNames) {
-            if (cameraEnumerator.isFrontFacing(name)) {
-                selectedDevice = name
-                break
+                // Send motion alert (in a real app, send to signaling server)
+                Log.d("StreamingService", "Motion detected: ${alert.id}")
             }
         }
-        selectedDevice = selectedDevice ?: deviceNames.firstOrNull()
-
-        selectedDevice?.let {
-            videoCapturer = cameraEnumerator.createCapturer(it, null)
-            val capturer = videoCapturer as? CameraVideoCapturer
-            capturer?.switchCamera(null)
-            
-            surfaceTextureHelper = SurfaceTextureHelper.create("capture_thread", eglBase!!.eglBaseContext)
-            videoCapturer?.initialize(surfaceTextureHelper!!, this, videoSource!!)
-            videoCapturer?.startCapture(1280, 720, 30)
-        }
-    }
-
-    private fun handleSignalingMessage(text: String) {
-        val msg = SignalingMessage.fromJson(text)
-        when (msg.type) {
-            "answer" -> {
-                msg.sdp?.let { sdp ->
-                    val sessionDescription = SessionDescription(SessionDescription.Type.ANSWER, sdp)
-                    peerConnection?.setRemoteDescription(
-                        object : SdpObserver {
-                            override fun onCreateSuccess(sessionDescription: SessionDescription) {}
-                            override fun onCreateFailure(error: String) {}
-                            override fun onSetSuccess() { Log.d("StreamingService", "Remote description set") }
-                            override fun onSetFailure(error: String) { Log.e("StreamingService", "Set remote failed: $error") }
-                        },
-                        sessionDescription
-                    )
-                }
-            }
-            "candidate" -> {
-                msg.candidate?.let { candidate ->
-                    val iceCandidate = IceCandidate(msg.sdpMid!!, msg.sdpMLineIndex!!, candidate)
-                    peerConnection?.addIceCandidate(iceCandidate)
-                }
-            }
-            "viewer_joined" -> {
-                Log.d("StreamingService", "Viewer joined: ${msg.cameraId}")
-            }
-        }
-    }
-
-    private fun onCameraFrame(data: ByteBuffer, width: Int, height: Int) {
-        // Frame is handled by CameraManager -> CameraX -> WebRTC capturer
-        // The WebRTC capturer gets frames directly from CameraX
+        previousFrame = currentBytes
     }
 
     private fun stopStreaming() {
         isStreaming = false
-        webSocket?.close(1000, "Client stopping")
-        webSocket = null
-        videoCapturer?.stopCapture()
-        videoCapturer?.dispose()
-        videoCapturer = null
-        surfaceTextureHelper?.dispose()
-        surfaceTextureHelper = null
-        peerConnection?.close()
-        peerConnection = null
-        videoTrack?.dispose()
-        videoTrack = null
-        videoSource?.dispose()
-        videoSource = null
         cameraManager?.stop()
+        mjpegServer?.stop()
+        mjpegServer = null
         cameraManager = null
         stopForeground(true)
         stopSelf()
@@ -384,24 +186,156 @@ class StreamingService : Service() {
             .build()
     }
 
-    private fun updateNotification(text: String) {
-        val notification = createNotification(text)
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(notificationId, notification)
-    }
-
-    private fun runOnUiThread(action: () -> Unit) {
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        handler.post(action)
-    }
-
     override fun onDestroy() {
         super.onDestroy()
         stopStreaming()
         cameraManager?.shutdown()
-        eglBase?.release()
-        peerConnectionFactory?.dispose()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // Simple MJPEG HTTP Server
+    private class MjpegServer(private val port: Int) {
+        private var serverSocket: ServerSocket? = null
+        private var running = false
+        private var acceptThread: Thread? = null
+        private var currentFrame: ByteArray? = null
+        private var frameWidth = 640
+        private var frameHeight = 480
+        private val frameLock = Any()
+
+        fun start() {
+            try {
+                serverSocket = ServerSocket(port)
+            } catch (e: java.io.IOException) {
+                Log.e("MjpegServer", "Failed to start server on port $port", e)
+                return
+            }
+            running = true
+            acceptThread = Thread({ acceptLoop() }, "mjpeg-accept").apply { isDaemon = true; start() }
+        }
+
+        fun setFrame(frame: ByteBuffer, width: Int, height: Int) {
+            val bytes = ByteArray(frame.remaining())
+            frame.rewind()
+            frame.get(bytes)
+            synchronized(frameLock) {
+                currentFrame = bytes
+                frameWidth = width
+                frameHeight = height
+            }
+        }
+
+        fun stop() {
+            running = false
+            try {
+                serverSocket?.close()
+            } catch (e: java.io.IOException) {
+                Log.e("MjpegServer", "Error closing server", e)
+            }
+        }
+
+        private fun acceptLoop() {
+            while (running) {
+                try {
+                    val socket = serverSocket?.accept() ?: break
+                    Thread({ handleClient(socket) }, "mjpeg-client").apply { isDaemon = true; start() }
+                } catch (e: java.io.IOException) {
+                    if (!running) break
+                }
+            }
+        }
+
+        private fun handleClient(socket: Socket) {
+            try {
+                socket.setSoTimeout(5000)
+                val input = socket.getInputStream()
+                val output = socket.getOutputStream()
+
+                // Read request
+                val request = StringBuilder()
+                var c = input.read()
+                while (c != -1 && c != 10) {
+                    if (c != 13) request.append(c.toChar())
+                    c = input.read()
+                }
+
+                val requestLine = request.toString().trim()
+                if (requestLine.startsWith("GET")) {
+                    val parts = requestLine.split(" ")
+                    if (parts.size > 1) {
+                        val path = parts[1]
+                        if (path == "/" || path == "/index.html") {
+                            serveIndex(output)
+                        } else if (path == "/videofeed" || path == "/stream") {
+                            serveStream(output)
+                        } else if (path == "/snapshot.jpg") {
+                            serveSnapshot(output)
+                        } else {
+                            serve404(output)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MjpegServer", "Client error", e)
+            } finally {
+                try { socket.close() } catch (e: Exception) {}
+            }
+        }
+
+        private fun serveIndex(out: java.io.OutputStream) {
+            val html = """
+                <html><head><title>WebCam Stream</title></head>
+                <body style='background:#000;margin:0'>
+                <img src='/stream' style='width:100%'>
+                </body></html>
+            """.trimIndent()
+            val bytes = html.toByteArray()
+            val header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${bytes.size}\r\n\r\n"
+            out.write(header.toByteArray())
+            out.write(bytes)
+            out.flush()
+        }
+
+        private fun serveStream(out: java.io.OutputStream) {
+            val header = "HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=frame\r\nCache-Control: no-cache\r\n\r\n"
+            out.write(header.toByteArray())
+            out.flush()
+
+            try {
+                while (running) {
+                    val frame = synchronized(frameLock) { currentFrame?.copyOf() }
+                    if (frame != null) {
+                        val boundary = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n"
+                        out.write(boundary.toByteArray())
+                        out.write(frame)
+                        out.write("\r\n".toByteArray())
+                        out.flush()
+                    }
+                    Thread.sleep(100)
+                }
+            } catch (e: InterruptedException) {
+                // Exit loop
+            }
+        }
+
+        private fun serveSnapshot(out: java.io.OutputStream) {
+            val frame = synchronized(frameLock) { currentFrame?.copyOf() }
+            if (frame != null) {
+                val header = "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n"
+                out.write(header.toByteArray())
+                out.write(frame)
+            } else {
+                val notFound = "HTTP/1.1 404 Not Found\r\n\r\nNo frame"
+                out.write(notFound.toByteArray())
+            }
+            out.flush()
+        }
+
+        private fun serve404(out: java.io.OutputStream) {
+            val notFound = "HTTP/1.1 404 Not Found\r\n\r\nNot Found"
+            out.write(notFound.toByteArray())
+            out.flush()
+        }
+    }
 }
