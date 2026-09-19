@@ -20,8 +20,10 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Regenerate Gradle wrapper
-        run: gradle wrapper
+      - name: Fix gradle wrapper version
+        run: |
+          sed -i 's|gradle-.*-bin.zip|gradle-8.7-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+          cat gradle/wrapper/gradle-wrapper.properties
 
       - name: Find and build project
         run: |
