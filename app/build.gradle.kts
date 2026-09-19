@@ -76,9 +76,8 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.2")
     implementation("androidx.camera:camera-video:1.3.2")
 
-    // WebRTC - using a compatible library (will implement WebRTC signaling manually)
-    // For now, we'll use the original MJPEG approach + add WebRTC later
-    // implementation("org.webrtc:google-webrtc:1.0.34001")
+    // WebRTC for push streaming
+    implementation("org.webrtc:google-webrtc:1.0.34001")
 
     // ML Kit - using simple frame differencing for motion detection instead
     // implementation("com.google.mlkit:object-detection:17.2.0")
