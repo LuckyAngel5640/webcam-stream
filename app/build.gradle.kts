@@ -56,6 +56,7 @@ android {
 repositories {
     google()
     mavenCentral()
+    maven { url = uri("https://jitpack.io") }
 }
 
 dependencies {
@@ -76,8 +77,8 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.2")
     implementation("androidx.camera:camera-video:1.3.2")
 
-    // WebRTC for push streaming
-    implementation("org.webrtc:google-webrtc:1.0.34001")
+    // WebRTC for push streaming - using version available in Google Maven
+    implementation("org.webrtc:google-webrtc:1.0.32006")
 
     // ML Kit - using simple frame differencing for motion detection instead
     // implementation("com.google.mlkit:object-detection:17.2.0")
