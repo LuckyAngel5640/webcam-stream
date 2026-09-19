@@ -53,7 +53,7 @@ android {
     }
 }
 
-}
+dependencies {
     // AndroidX Core
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
@@ -71,8 +71,8 @@ android {
     implementation("androidx.camera:camera-view:1.3.2")
     implementation("androidx.camera:camera-video:1.3.2")
 
-    // WebRTC for push streaming - using version available in Google Maven
-    implementation("org.webrtc:google-webrtc:1.0.32006")
+    // WebRTC for push streaming - use version from Google Maven
+    implementation("org.webrtc:google-webrtc:104.5112.05")
 
     // ML Kit - using simple frame differencing for motion detection instead
     // implementation("com.google.mlkit:object-detection:17.2.0")
