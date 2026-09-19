@@ -20,6 +20,9 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      - name: Regenerate Gradle wrapper
+        run: gradle wrapper
+
       - name: Find and build project
         run: |
           find . -name "gradlew" -type f
