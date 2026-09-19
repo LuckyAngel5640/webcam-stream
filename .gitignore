@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+website/node_modules/
+signaling-server/node_modules/
+
+# Build outputs
+build/
+app/build/
+website/build/
+
+# Gradle
+.gradle/
+gradle/wrapper/gradle-wrapper.jar
+
+# Android
+*.apk
+*.aab
+local.properties
+*.keystore
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
