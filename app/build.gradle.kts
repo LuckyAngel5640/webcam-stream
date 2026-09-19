@@ -52,7 +52,6 @@ android {
         }
     }
 }
-}
 
 dependencies {
     // AndroidX Core
