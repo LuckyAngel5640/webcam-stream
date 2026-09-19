@@ -2,55 +2,80 @@ name: Build Android APK
 
 on:
   push:
-    branches: [master, main]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: دریافت کدها
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: نصب جاوا 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-34
-            build-tools;34.0.0
-            cmdline-tools;latest
+      - name: بازسازی فایل‌های Gradle Wrapper
+        run: |
+          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
+            cp gradle/wrapper/gradle-wrapper.properties /tmp/gradle-wrapper.properties
+          fi
+          gradle wrapper
+          if [ -f /tmp/gradle-wrapper.properties ]; then
+            cp /tmp/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.properties
+          fi
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x WebCamApp/gradlew
-        working-directory: WebCamApp
+      - name: فعال‌سازی AndroidX و پاکسازی تنظیمات محلی
+        run: |
+          rm -f local.properties
+          touch gradle.properties
+          sed -i '/android.useAndroidX/d' gradle.properties 2>/dev/null || true
+          sed -i '/android.enableJetifier/d' gradle.properties 2>/dev/null || true
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
 
-      - name: Build Debug APK
+      - name: رفع خطای آیکون‌ها و رنگ transparent
+        run: |
+          sed -i 's|@mipmap/ic_launcher_round|@android:drawable/sym_def_app_icon|g' app/src/main/AndroidManifest.xml
+          sed -i 's|@mipmap/ic_launcher|@android:drawable/sym_def_app_icon|g' app/src/main/AndroidManifest.xml
+          find app/src/main/res/ -name "*.xml" -exec sed -i 's|@color/transparent|@android:color/transparent|g' {} +
+          if [ -f app/src/main/res/values/colors.xml ]; then
+            if ! grep -q 'name="transparent"' app/src/main/res/values/colors.xml; then
+              sed -i 's|</resources>|    <color name="transparent">#00000000</color>\n</resources>|' app/src/main/res/values/colors.xml
+            fi
+          fi
+
+      - name: فعال‌سازی MultiDex (حل خطای 64K)
+        run: |
+          # تنظیم minSdk روی 21 برای سازگاری کامل MultiDex
+          sed -i -E 's/(minSdkVersion|minSdk)[[:space:]=]+[0-9]+/minSdk 21/g' app/build.gradle 2>/dev/null || true
+          sed -i -E 's/(minSdkVersion|minSdk)[[:space:]=]+[0-9]+/minSdk = 21/g' app/build.gradle.kts 2>/dev/null || true
+          
+          # فعال‌سازی multiDexEnabled در تنظیمات
+          if [ -f app/build.gradle ]; then
+            if ! grep -q "multiDexEnabled" app/build.gradle; then
+              sed -i '/defaultConfig[[:space:]]*{/a \        multiDexEnabled true' app/build.gradle
+            fi
+          fi
+          if [ -f app/build.gradle.kts ]; then
+            if ! grep -q "multiDexEnabled" app/build.gradle.kts; then
+              sed -i '/defaultConfig[[:space:]]*{/a \        multiDexEnabled = true' app/build.gradle.kts
+            fi
+          fi
+
+      - name: بیلد نهایی خروجی APK
         run: ./gradlew assembleDebug --no-daemon
-        working-directory: WebCamApp
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
 
-      - name: Upload Debug APK
+      - name: ذخیره و آماده‌سازی فایل APK برای دانلود
         uses: actions/upload-artifact@v4
         with:
-          name: WebCamApp-debug-apk
-          path: WebCamApp/app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
-
-      - name: Create Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: WebCamApp/app/build/outputs/apk/debug/app-debug.apk
-          generate_release_notes: true
+          name: app-debug-apk
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 7
